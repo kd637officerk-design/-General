@@ -2312,7 +2312,7 @@ async function scanDevice(silent){
   {const bp=new Map(tracks.filter(t=>t.path).map(t=>[t.path,t]));songs.forEach(x=>{const o=bp.get(x.path);if(o&&!o.dur&&x.duration){o.dur=x.duration;putT(o)}})}
   setTimeout(bgMeta,400);
   const have=new Set(tracks.filter(t=>t.path).map(t=>t.path)),fresh=songs.filter(x=>x.path&&!have.has(x.path));
-  if(!fresh.length){if(!silent)toast('No new songs found ('+songs.length+' on this phone)');return}
+  if(!fresh.length){setTimeout(()=>{const a=_needArt();if(a.length)bgTags(a)},300);if(!silent)toast('No new songs found ('+songs.length+' on this phone)');return}
   const news=[];
   for(let i=0;i<fresh.length;i++){
    const x=fresh[i],t={id:uid(),name:x.title||x.name||'Unknown',kind:'audio',blob:null,cover:null,local:1,chk:2,dur:x.duration||0,path:x.path,url:CAP.convertFileSrc('file://'+x.path),folder:x.folder||''};
@@ -2357,10 +2357,13 @@ async function bgTags(list){
    if(g.title&&!t.nameSet){t.name=g.title;ch=true}if(g.artist&&!t.artist){t.artist=g.artist;ch=true}if(g.album&&!t.album){t.album=g.album;ch=true}
    const L=g.lyrics||g.USLT,ly=typeof L==='string'?L:(L&&(L.lyrics||L.text));if(ly){t.lyr=ly;ch=true}
    if(ch)putT(t);ok()},onError:()=>ok()})}catch(_){ok()}});
+  if(!t.emb&&!t.cover&&!t.artTried&&typeof LM!=='undefined'&&LM&&NATIVE&&t.path){t.artTried=1;try{const r=await LM.art({path:t.path});if(r&&r.data){const bin=atob(r.data),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);t.emb=new Blob([u],{type:r.type||'image/jpeg'})}}catch(_){}putT(t)}
   if(list.indexOf(t)%25===24){render();await new Promise(r=>setTimeout(r,0))}
  }
  render();save()
 }
+const _needArt=()=>tracks.filter(t=>t.kind==='audio'&&t.path&&!t.emb&&!t.cover&&!t.artTried);
+setTimeout(()=>{try{if(NATIVE&&LM){const a=_needArt();if(a.length)bgTags(a)}}catch(_){}},6000);
 
 /* ---------- equalizer + bass boost (WebAudio, off by default) ---------- */
 let eqCtx=null,eqN=[];
