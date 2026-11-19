@@ -1228,13 +1228,14 @@ const TAB={audio:'music',video:'video',book:'books'};
 const _ms=v=>{v=+v||0;return v&&v<1e11?v*1000:v};
 const _col=new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
 const sortKey={
- added:t=>t.id||0,
- date:t=>t.mod||(t.local?0:((t.blob&&t.blob.lastModified)||t.id||0)),
+ added:t=>t.addedAt||t.id||0,
+ date:t=>t.mod||(t.blob&&t.blob.lastModified)||t.addedAt||t.id||0,
+ played:t=>(S.st[t.id]&&S.st[t.id].c)||0,
  name:t=>t.name||'',
  artist:t=>t.artist||'',
  size:t=>t.sz||(t.blob&&t.blob.size)||0,
  dur:t=>t.dur||0};
-const SORTS=[['date','Date modified','Newest first','Oldest first',-1],['added','Date added','Newest first','Oldest first',-1],['name','Name','A to Z','Z to A',1],['artist','Artist','A to Z','Z to A',1],['size','Size','Largest first','Smallest first',-1],['dur','Length','Longest first','Shortest first',-1]];
+const SORTS=[['date','Newest','Newest first','Oldest first',-1],['played','Most played','Most played first','Least played first',-1],['name','A to Z','A to Z','Z to A',1],['artist','Artist','A to Z','Z to A',1],['dur','Longest duration','Longest first','Shortest first',-1],['added','Date added','Newest first','Oldest first',-1],['size','Size','Largest first','Smallest first',-1]];
 function sortList(l,by,dir){
  const f=sortKey[by]||sortKey.added,txt=by==='name'||by==='artist',d=dir<0?-1:1;
  return [...l].sort((a,b)=>{const x=f(a),y=f(b);let r;
@@ -1724,10 +1725,12 @@ function plMenu(id){sheet('Add to playlist',S.pls.map(p=>({icon:p.ids.includes(i
 function newPl(id){const n=(prompt('Playlist name')||'').trim();if(!n)return;S.pls.push({id:Date.now(),name:n,ids:id?[id]:[]});save();render()}
 function rmPl(id){const t=tracks.find(x=>x.id===id),s=t&&S.sel[t.kind];if(s==='fav')delete S.fav[id];else{const p=S.pls.find(x=>x.id===s);if(p)p.ids=p.ids.filter(i=>i!==id)}render();save()}
 function favT(id){if(S.fav[id])delete S.fav[id];else S.fav[id]=1;$('#heart').classList.toggle('fav',!!S.fav[S.cur[S.npk]]);render();save()}
-$('#bSort').onclick=()=>{const cur=SORTS.find(s=>s[0]===S.sort.by)||SORTS[1],items=[];
- SORTS.forEach(s=>items.push({icon:cur[0]===s[0]?'●':'○',label:s[1],on:cur[0]===s[0],keep:true,fn:()=>{if(cur[0]!==s[0]){S.sort.by=s[0];S.sort.dir=s[4];S.sort.set=true;render();save()}$('#bSort').click()}}));
- [[cur[2],cur[4]],[cur[3],-cur[4]]].forEach(([lb,dv])=>items.push({icon:(S.sort.dir<0?-1:1)===dv?'●':'○',label:cur[1]+': '+lb,on:(S.sort.dir<0?-1:1)===dv,fn:()=>{S.sort.by=cur[0];S.sort.dir=dv;S.sort.set=true;render();save()}}));
- sheet('Sort by',items)};
+$('#bSort').onclick=()=>{const cur=SORTS.find(s=>s[0]===S.sort.by)||SORTS[0],items=[];
+ SORTS.forEach(s=>{const on=cur[0]===s[0],d=S.sort.dir<0?-1:1;
+  items.push({icon:on?(d<0?'↓':'↑'):'○',label:s[1]+(on?' · '+(d===s[4]?s[2]:s[3]):''),on,keep:true,fn:()=>{
+   if(on)S.sort.dir=d<0?1:-1;else{S.sort.by=s[0];S.sort.dir=s[4]}
+   S.sort.set=true;render();save();$('#bSort').click()}})});
+ sheet(({music:'Songs',lists:'Songs',video:'Videos',books:'Books'})[S.tab]+' sort',items)};
 function pickFiles(acc,book){const f=$('#fi');f.accept=acc;f.dataset.book=book?'1':'';f.click()}
 $('#bSettings').onclick=()=>S.tab==='lists'?plMenu():mainMenu();
 
@@ -2309,13 +2312,14 @@ async function scanDevice(silent){
   const phonePaths=new Set(allSongs.map(x=>x.path));
   const stale=tracks.filter(t=>t.path&&t.local&&!phonePaths.has(t.path));
   for(const t of stale){tracks=tracks.filter(x=>x.id!==t.id);S.pls.forEach(p=>p.ids=p.ids.filter(i=>i!==t.id));delete S.fav[t.id];delete S.st[t.id];delete S.pos[t.id];await tx('tracks','readwrite',o=>o.delete(t.id)).catch(()=>{});if(cov[t.id]){URL.revokeObjectURL(cov[t.id]);delete cov[t.id]}}
-  {const bp=new Map(tracks.filter(t=>t.path).map(t=>[t.path,t]));songs.forEach(x=>{const o=bp.get(x.path);if(o&&!o.dur&&x.duration){o.dur=x.duration;putT(o)}})}
+  {const bp=new Map(tracks.filter(t=>t.path).map(t=>[t.path,t]));songs.forEach(x=>{const o=bp.get(x.path);if(!o)return;let ch=false;if(!o.dur&&x.duration){o.dur=x.duration;ch=true}if(!o.addedAt&&x.added){o.addedAt=_ms(x.added);ch=true}if(!o.mod&&x.modified){o.mod=_ms(x.modified);ch=true}if(!o.sz&&x.size){o.sz=+x.size;ch=true}if(ch)putT(o)})}
   setTimeout(bgMeta,400);
   const have=new Set(tracks.filter(t=>t.path).map(t=>t.path)),fresh=songs.filter(x=>x.path&&!have.has(x.path));
   if(!fresh.length){setTimeout(()=>{const a=_needArt();if(a.length)bgTags(a)},300);if(!silent)toast('No new songs found ('+songs.length+' on this phone)');return}
   const news=[];
   for(let i=0;i<fresh.length;i++){
    const x=fresh[i],t={id:uid(),name:x.title||x.name||'Unknown',kind:'audio',blob:null,cover:null,local:1,chk:2,dur:x.duration||0,path:x.path,url:CAP.convertFileSrc('file://'+x.path),folder:x.folder||''};
+   if(x.added)t.addedAt=_ms(x.added);if(x.modified)t.mod=_ms(x.modified);if(x.size)t.sz=+x.size;
    if(x.artist)t.artist=x.artist;if(x.album)t.album=x.album;
    tracks.push(t);news.push(t);await putT(t);
    if(i%50===49){if(!silent)toast('Adding '+(i+1)+' / '+fresh.length+'…');await new Promise(r=>setTimeout(r,0))}
@@ -2651,7 +2655,7 @@ async function takeShared(){
  try{
   tracks=(await tx('tracks','readonly',o=>o.getAll()))||[];
   if(NATIVE)tracks.forEach(t=>{if(t.path)t.url=CAP.convertFileSrc('file://'+t.path)});
-  const st=await tx('meta','readonly',o=>o.get('state'));if(st)S=Object.assign(S,st);
+  const st=await tx('meta','readonly',o=>o.get('state'));if(st)S=Object.assign(S,st);if(S.sortV!==2){S.sort={by:'date',dir:-1};S.sortV=2}
   const w=await tx('meta','readonly',o=>o.get('wall'));if(w)setWall(w);else setWall(orkoBlob());
  }catch(_){}
  if(!S.fav)S.fav={};if(!S.st)S.st={};if(!S.hid)S.hid={};if(!TAB[kind()]&&!['music','lists','video','books'].includes(S.tab))S.tab='music';
