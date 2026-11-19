@@ -1,9 +1,17 @@
 package com.aeterna.vitrix;
 
 import android.Manifest;
+import android.app.KeyguardManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.content.ContentUris;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.media.MediaMetadataRetriever;
+import java.io.ByteArrayOutputStream;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -74,6 +82,54 @@ public class LocalMusicPlugin extends Plugin {
             }
         } catch (Exception e) { call.reject(e.getMessage()); return; }
         JSObject r = new JSObject(); r.put("songs", songs); call.resolve(r);
+    }
+
+
+    private byte[] shrink(byte[] raw) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(raw, 0, raw.length, o);
+            int ss = 1; while (o.outWidth / ss > 900 || o.outHeight / ss > 900) ss *= 2;
+            BitmapFactory.Options d = new BitmapFactory.Options(); d.inSampleSize = ss;
+            Bitmap b = BitmapFactory.decodeByteArray(raw, 0, raw.length, d);
+            if (b == null) return null;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            b.compress(Bitmap.CompressFormat.JPEG, 88, out); b.recycle();
+            return out.toByteArray();
+        } catch (Throwable t) { return null; }
+    }
+
+    @PluginMethod
+    public void art(PluginCall call) {
+        String p = call.getString("path");
+        if (p == null) { call.resolve(new JSObject()); return; }
+        byte[] pic = null;
+        try {
+            MediaMetadataRetriever m = new MediaMetadataRetriever();
+            m.setDataSource(p);
+            byte[] e = m.getEmbeddedPicture();
+            m.release();
+            if (e != null) pic = shrink(e);
+        } catch (Throwable t) { }
+        if (pic == null) {
+            File dir = new File(p).getParentFile();
+            String[] names = { "cover", "folder", "front", "albumart", "album", "art" };
+            String[] exts = { ".jpg", ".jpeg", ".png", ".webp" };
+            if (dir != null) for (String n : names) { for (String x : exts) {
+                File f = new File(dir, n + x);
+                if (!f.exists()) continue;
+                try {
+                    java.io.FileInputStream in = new java.io.FileInputStream(f);
+                    byte[] raw = new byte[(int) f.length()]; int off = 0, r;
+                    while (off < raw.length && (r = in.read(raw, off, raw.length - off)) > 0) off += r;
+                    in.close(); pic = shrink(raw);
+                } catch (Throwable t) { }
+                if (pic != null) break;
+            } if (pic != null) break; }
+        }
+        JSObject r = new JSObject();
+        if (pic != null) { r.put("data", Base64.encodeToString(pic, Base64.NO_WRAP)); r.put("type", "image/jpeg"); }
+        call.resolve(r);
     }
 
     @PluginMethod
@@ -186,9 +242,92 @@ public class LocalMusicPlugin extends Plugin {
         } catch (Exception e) { call.reject(e.getMessage()); }
     }
 
-    /* lock-screen overlay not used: the system media notification already shows on the lock screen */
-    @PluginMethod public void setLockEnabled(PluginCall c) { c.resolve(); }
-    @PluginMethod public void setNowPlaying(PluginCall c) { c.resolve(); }
-    @PluginMethod public void requestOverlay(PluginCall c) { c.resolve(); }
-    @PluginMethod public void canOverlay(PluginCall c) { JSObject r = new JSObject(); r.put("value", false); c.resolve(r); }
+    /* ---------- lock-screen player ---------- */
+    static String NP_title = "", NP_artist = "", NP_album = "";
+    static double NP_dur = 0, NP_pos = 0;
+    static boolean NP_playing = false, NP_fav = false;
+    static long NP_stamp = 0, NP_pausedSince = 0;
+    static Bitmap NP_cover = null;
+    static boolean lockEnabled = false;
+    static LocalMusicPlugin inst;
+    private BroadcastReceiver screenRcv;
+
+    @Override
+    public void load() {
+        inst = this;
+        screenRcv = new BroadcastReceiver() {
+            public void onReceive(Context c, Intent i) {
+                String a = i.getAction();
+                if (Intent.ACTION_SCREEN_ON.equals(a)) maybeShow(c);
+                else if (Intent.ACTION_USER_PRESENT.equals(a)) LockActivity.closeIt();
+            }
+        };
+        IntentFilter f = new IntentFilter(Intent.ACTION_SCREEN_ON);
+        f.addAction(Intent.ACTION_USER_PRESENT);
+        getContext().registerReceiver(screenRcv, f);
+    }
+
+    private void maybeShow(Context c) {
+        try {
+            if (!lockEnabled || NP_title == null || NP_title.isEmpty()) return;
+            if (!NP_playing && System.currentTimeMillis() - NP_pausedSince > 60000) return;
+            KeyguardManager km = (KeyguardManager) c.getSystemService(Context.KEYGUARD_SERVICE);
+            if (km == null || !km.isKeyguardLocked()) return;
+            if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(c)) return;
+            Intent i = new Intent(c, LockActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            c.startActivity(i);
+        } catch (Throwable t) { }
+    }
+
+    static void emit(String action, double pos) {
+        if (inst == null) return;
+        JSObject o = new JSObject(); o.put("action", action); o.put("pos", pos);
+        inst.notifyListeners("lockAction", o);
+    }
+
+    @PluginMethod
+    public void setLockEnabled(PluginCall c) {
+        lockEnabled = c.getBoolean("enabled", false);
+        c.resolve();
+    }
+
+    @PluginMethod
+    public void setNowPlaying(PluginCall c) {
+        boolean wasPlaying = NP_playing;
+        NP_title = c.getString("title", ""); NP_artist = c.getString("artist", ""); NP_album = c.getString("album", "");
+        NP_dur = c.getDouble("duration", 0.0); NP_pos = c.getDouble("position", 0.0);
+        NP_playing = c.getBoolean("playing", false); NP_fav = c.getBoolean("fav", false);
+        NP_stamp = System.currentTimeMillis();
+        if (wasPlaying && !NP_playing) NP_pausedSince = NP_stamp;
+        if (c.getBoolean("coverSet", false)) {
+            NP_cover = null;
+            String b64 = c.getString("cover", "");
+            if (b64 != null && !b64.isEmpty()) {
+                try {
+                    byte[] raw = Base64.decode(b64, Base64.DEFAULT);
+                    NP_cover = BitmapFactory.decodeByteArray(raw, 0, raw.length);
+                } catch (Throwable t) { }
+            }
+        }
+        LockActivity.refresh();
+        c.resolve();
+    }
+
+    @PluginMethod
+    public void canOverlay(PluginCall c) {
+        JSObject r = new JSObject();
+        r.put("value", Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(getContext()));
+        c.resolve(r);
+    }
+
+    @PluginMethod
+    public void requestOverlay(PluginCall c) {
+        try {
+            Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getContext().getPackageName()));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+        } catch (Throwable t) { }
+        c.resolve();
+    }
 }
